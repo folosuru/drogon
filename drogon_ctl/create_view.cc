@@ -38,6 +38,12 @@ enum class CspLeftTagType
     kSubViewStart,
 };
 
+struct ParseContext
+{
+    bool in_cxx = false;
+    int current_line = 0;
+};
+
 using namespace drogon_ctl;
 
 static std::string &replace_all(std::string &str,
@@ -161,7 +167,7 @@ static void parseLine(std::ofstream &oSrcFile,
                       std::string &line,
                       const std::string &streamName,
                       const std::string &viewDataName,
-                      int &cxx_flag)
+                      ParseContext &context)
 {
     std::string::size_type pos(0);
     // std::cout<<line<<"("<<line.length()<<")\n";
@@ -170,7 +176,7 @@ static void parseLine(std::ofstream &oSrcFile,
         line.resize(line.length() - 1);
     }
 
-    if (cxx_flag == 0)
+    if (!context.in_cxx)
     {
         auto found_tag = findFirstLeftTag(line);
         pos = found_tag.second;
@@ -191,10 +197,9 @@ static void parseLine(std::ofstream &oSrcFile,
         if (found_tag.first == CspLeftTagType::kCxxStart)
         {
             std::string newLine = line.substr(pos + cxx_lang.length());
-            cxx_flag = 1;
+            context.in_cxx = true;
             if (newLine.length() > 0)
-                parseLine(
-                    oSrcFile, newLine, streamName, viewDataName, cxx_flag);
+                parseLine(oSrcFile, newLine, streamName, viewDataName, context);
         }
         else if (found_tag.first == CspLeftTagType::kCxxValStart)
         {
@@ -213,11 +218,12 @@ static void parseLine(std::ofstream &oSrcFile,
                 std::string tailLine =
                     newLine.substr(pos + cxx_val_end.length());
                 parseLine(
-                    oSrcFile, tailLine, streamName, viewDataName, cxx_flag);
+                    oSrcFile, tailLine, streamName, viewDataName, context);
             }
             else
             {
-                std::cerr << "format err!" << std::endl;
+                std::cerr << "format error at line " << context.current_line
+                          << ": Missing closing bracket (\"]]\")." << std::endl;
                 exit(1);
             }
         }
@@ -238,11 +244,12 @@ static void parseLine(std::ofstream &oSrcFile,
                 std::string tailLine =
                     newLine.substr(pos + sub_view_end.length());
                 parseLine(
-                    oSrcFile, tailLine, streamName, viewDataName, cxx_flag);
+                    oSrcFile, tailLine, streamName, viewDataName, context);
             }
             else
             {
-                std::cerr << "format err!" << std::endl;
+                std::cerr << "format error at line " << context.current_line
+                          << ": Missing closing tag (\"%>\")." << std::endl;
                 exit(1);
             }
         }
@@ -254,10 +261,9 @@ static void parseLine(std::ofstream &oSrcFile,
             std::string newLine = line.substr(0, pos);
             parseCxxLine(oSrcFile, newLine, streamName, viewDataName);
             std::string oldLine = line.substr(pos + cxx_end.length());
-            cxx_flag = 0;
+            context.in_cxx = false;
             if (oldLine.length() > 0)
-                parseLine(
-                    oSrcFile, oldLine, streamName, viewDataName, cxx_flag);
+                parseLine(oSrcFile, oldLine, streamName, viewDataName, context);
         }
         else
         {
@@ -538,9 +544,10 @@ void create_view::newViewSourceFile(std::ofstream &file,
     // oSrcFile <<"\tstd::string "<<bodyName<<";\n";
     file << "\tdrogon::OStringStream " << streamName << ";\n";
     file << "\tstd::string layoutName{\"" << layoutName << "\"};\n";
-    int cxx_flag = 0;
+    ParseContext context = {};
     for (std::string buffer; std::getline(infile, buffer);)
     {
+        context.current_line++;
         if (buffer.length() > 0)
         {
             std::smatch results;
@@ -555,7 +562,7 @@ void create_view::newViewSourceFile(std::ofstream &file,
             std::regex re("\\{%[ \\t]*(((?!%\\}).)*[^ \\t])[ \\t]*%\\}");
             buffer = std::regex_replace(buffer, re, "<%c++$$$$<<$1;%>");
         }
-        parseLine(file, buffer, streamName, viewDataName, cxx_flag);
+        parseLine(file, buffer, streamName, viewDataName, context);
     }
     file << "if(layoutName.empty())\n{\n";
     file << "std::string ret{std::move(" << streamName << ".str())};\n";
