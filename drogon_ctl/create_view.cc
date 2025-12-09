@@ -14,6 +14,7 @@
 
 #include "create_view.h"
 #include "cmd.h"
+#include "drogon/utils/OStringStream.h"
 #include <drogon/utils/Utilities.h>
 #include <iostream>
 #include <fstream>
@@ -44,6 +45,65 @@ struct ParseContext
     int current_line = 0;
 };
 
+class OutputBuffer
+{
+  public:
+    OStringStream &WriteCxx()
+    {
+        terminateLiteral();
+        return output;
+    }
+
+    void WriteLiteral(const std::string &streamName,
+                      const std::string &text,
+                      bool appendReturn = false)
+    {
+        if (!literal_unterminated)
+        {
+            output << streamName << "<<";
+            literal_unterminated = true;
+        }
+
+        literal_total_length += text.length();
+        if (appendReturn)
+        {
+            output << "\n\"" << text << "\\n\"";
+            literal_total_length += text.length() + 1;
+        }
+        else
+        {
+            output << "\n\"" << text << "\"";
+        }
+    }
+
+    void terminateLiteral()
+    {
+        if (literal_unterminated)
+        {
+            output << ";\n";
+            literal_unterminated = false;
+        }
+    }
+
+    std::string getString()
+    {
+        terminateLiteral();
+        return std::move(output.str());
+    }
+
+    size_t getLiteralLength() const
+    {
+        return literal_total_length;
+    }
+
+    OutputBuffer() = default;
+
+  private:
+    OStringStream output;
+    bool literal_unterminated = false;
+    size_t literal_total_length = 0;
+};
+
 using namespace drogon_ctl;
 
 static std::string &replace_all(std::string &str,
@@ -67,7 +127,7 @@ static std::string &replace_all(std::string &str,
     return str;
 }
 
-static void parseCxxLine(std::ofstream &oSrcFile,
+static void parseCxxLine(OutputBuffer &output,
                          const std::string &line,
                          const std::string &streamName,
                          const std::string &viewDataName)
@@ -77,46 +137,46 @@ static void parseCxxLine(std::ofstream &oSrcFile,
         std::string tmp = line;
         replace_all(tmp, cxx_output, streamName);
         replace_all(tmp, cxx_view_data, viewDataName);
-        oSrcFile << tmp << "\n";
+        output.WriteCxx() << tmp << "\n";
     }
 }
 
-static void outputVal(std::ofstream &oSrcFile,
+static void outputVal(OutputBuffer &output,
                       const std::string &streamName,
                       const std::string &viewDataName,
                       const std::string &keyName)
 {
-    oSrcFile << "{\n";
-    oSrcFile << "    auto & val=" << viewDataName << "[\"" << keyName
-             << "\"];\n";
-    oSrcFile << "    if(val.type()==typeid(const char *)){\n";
-    oSrcFile << "        " << streamName
-             << "<<*(std::any_cast<const char *>(&val));\n";
-    oSrcFile << "    }else "
-                "if(val.type()==typeid(std::string)||val.type()==typeid(const "
-                "std::string)){\n";
-    oSrcFile << "        " << streamName
-             << "<<*(std::any_cast<const std::string>(&val));\n";
-    oSrcFile << "    }\n";
-    oSrcFile << "}\n";
+    output.WriteCxx()
+        << "{\n"
+        << "    auto & val=" << viewDataName << "[\"" << keyName << "\"];\n"
+        << "    if(val.type()==typeid(const char *)){\n"
+        << "        " << streamName
+        << "<<*(std::any_cast<const char *>(&val));\n"
+        << "    }else "
+           "if(val.type()==typeid(std::string)||val.type()==typeid(const "
+           "std::string)){\n"
+        << "        " << streamName
+        << "<<*(std::any_cast<const std::string>(&val));\n"
+        << "    }\n"
+        << "}\n";
 }
 
-static void outputSubView(std::ofstream &oSrcFile,
+static void outputSubView(OutputBuffer &output,
                           const std::string &streamName,
                           const std::string &viewDataName,
                           const std::string &keyName)
 {
-    oSrcFile << "{\n";
-    oSrcFile << "    auto templ=DrTemplateBase::newTemplate(\"" << keyName
-             << "\");\n";
-    oSrcFile << "    if(templ){\n";
-    oSrcFile << "      " << streamName << "<< templ->genText(" << viewDataName
-             << ");\n";
-    oSrcFile << "    }\n";
-    oSrcFile << "}\n";
+    output.WriteCxx() << "{\n"
+                      << "    auto templ=DrTemplateBase::newTemplate(\""
+                      << keyName << "\");\n"
+                      << "    if(templ){\n"
+                      << "      " << streamName << "<< templ->genText("
+                      << viewDataName << ");\n"
+                      << "    }\n"
+                      << "}\n";
 }
 
-static void outputText(std::ofstream &oSrcFile,
+static void outputText(OutputBuffer &output,
                        std::string line,
                        const std::string &streamName,
                        bool do_return)
@@ -125,20 +185,15 @@ static void outputText(std::ofstream &oSrcFile,
     {
         replace_all(line, "\\", "\\\\");
         replace_all(line, "\"", "\\\"");
-        oSrcFile << "\t" << streamName << " << \"" << line;
+        output.WriteLiteral(streamName, line, do_return);
     }
     else
     {
         if (!do_return)  // when blank line and do not return
             return;
 
-        oSrcFile << "\t" << streamName << " << \"";
+        output.WriteLiteral(streamName, line, do_return);
     }
-
-    if (do_return)
-        oSrcFile << "\\n\";\n";
-    else
-        oSrcFile << "\";\n";
 }
 
 // if not found, second will be std::string::npos.
@@ -163,7 +218,7 @@ static std::pair<CspLeftTagType, std::string::size_type> findFirstLeftTag(
     return result;
 }
 
-static void parseLine(std::ofstream &oSrcFile,
+static void parseLine(OutputBuffer &output,
                       std::string &line,
                       const std::string &streamName,
                       const std::string &viewDataName,
@@ -184,14 +239,14 @@ static void parseLine(std::ofstream &oSrcFile,
         if (found_tag.second == std::string::npos)
         {
             // line dose not contain any tags
-            outputText(oSrcFile, line, streamName, true);
+            outputText(output, line, streamName, true);
             return;
         }
 
         if (pos != 0)
         {
             std::string oldLine = line.substr(0, pos);
-            outputText(oSrcFile, oldLine, streamName, false);
+            outputText(output, oldLine, streamName, false);
         }
 
         if (found_tag.first == CspLeftTagType::kCxxStart)
@@ -199,7 +254,7 @@ static void parseLine(std::ofstream &oSrcFile,
             std::string newLine = line.substr(pos + cxx_lang.length());
             context.in_cxx = true;
             if (newLine.length() > 0)
-                parseLine(oSrcFile, newLine, streamName, viewDataName, context);
+                parseLine(output, newLine, streamName, viewDataName, context);
         }
         else if (found_tag.first == CspLeftTagType::kCxxValStart)
         {
@@ -214,11 +269,10 @@ static void parseLine(std::ofstream &oSrcFile,
                 while (iterEnd != keyName.end() && *iterEnd != ' ')
                     ++iterEnd;
                 keyName = std::string(iter, iterEnd);
-                outputVal(oSrcFile, streamName, viewDataName, keyName);
+                outputVal(output, streamName, viewDataName, keyName);
                 std::string tailLine =
                     newLine.substr(pos + cxx_val_end.length());
-                parseLine(
-                    oSrcFile, tailLine, streamName, viewDataName, context);
+                parseLine(output, tailLine, streamName, viewDataName, context);
             }
             else
             {
@@ -240,11 +294,10 @@ static void parseLine(std::ofstream &oSrcFile,
                 while (iterEnd != keyName.end() && *iterEnd != ' ')
                     ++iterEnd;
                 keyName = std::string(iter, iterEnd);
-                outputSubView(oSrcFile, streamName, viewDataName, keyName);
+                outputSubView(output, streamName, viewDataName, keyName);
                 std::string tailLine =
                     newLine.substr(pos + sub_view_end.length());
-                parseLine(
-                    oSrcFile, tailLine, streamName, viewDataName, context);
+                parseLine(output, tailLine, streamName, viewDataName, context);
             }
             else
             {
@@ -259,15 +312,15 @@ static void parseLine(std::ofstream &oSrcFile,
         if ((pos = line.find(cxx_end)) != std::string::npos)
         {
             std::string newLine = line.substr(0, pos);
-            parseCxxLine(oSrcFile, newLine, streamName, viewDataName);
+            parseCxxLine(output, newLine, streamName, viewDataName);
             std::string oldLine = line.substr(pos + cxx_end.length());
             context.in_cxx = false;
             if (oldLine.length() > 0)
-                parseLine(oSrcFile, oldLine, streamName, viewDataName, context);
+                parseLine(output, oldLine, streamName, viewDataName, context);
         }
         else
         {
-            parseCxxLine(oSrcFile, line, streamName, viewDataName);
+            parseCxxLine(output, line, streamName, viewDataName);
         }
     }
 }
@@ -448,6 +501,8 @@ void create_view::newViewSourceFile(std::ofstream &file,
     file << "#include <deque>\n";
     file << "#include <queue>\n";
 
+    ParseContext context = {};
+
     // Find layout tag
     std::string layoutName;
     std::regex layoutReg("<%layout[ \\t]+(((?!%\\}).)*[^ \\t])[ \\t]*%>");
@@ -541,10 +596,10 @@ void create_view::newViewSourceFile(std::ofstream &file,
     // std::string bodyName=className+"_bodystr";
     std::string streamName = className + "_tmp_stream";
 
-    // oSrcFile <<"\tstd::string "<<bodyName<<";\n";
-    file << "\tdrogon::OStringStream " << streamName << ";\n";
-    file << "\tstd::string layoutName{\"" << layoutName << "\"};\n";
-    ParseContext context = {};
+    file << "\t thread_local drogon::OStringStream " << streamName << ";\n";
+    file << streamName << ".str().clear();\n";
+
+    OutputBuffer output_buf{};
     for (std::string buffer; std::getline(infile, buffer);)
     {
         context.current_line++;
@@ -562,18 +617,29 @@ void create_view::newViewSourceFile(std::ofstream &file,
             std::regex re("\\{%[ \\t]*(((?!%\\}).)*[^ \\t])[ \\t]*%\\}");
             buffer = std::regex_replace(buffer, re, "<%c++$$$$<<$1;%>");
         }
-        parseLine(file, buffer, streamName, viewDataName, context);
+        parseLine(output_buf, buffer, streamName, viewDataName, context);
     }
-    file << "if(layoutName.empty())\n{\n";
-    file << "std::string ret{std::move(" << streamName << ".str())};\n";
-    file << "return ret;\n}else\n{\n";
-    file << "auto templ = DrTemplateBase::newTemplate(layoutName);\n";
-    file << "if(!templ) return \"\";\n";
-    file << "HttpViewData data = " << viewDataName << ";\n";
-    file << "auto str = std::move(" << streamName << ".str());\n";
-    file << "if(!str.empty() && str[str.length()-1] == '\\n') "
-            "str.resize(str.length()-1);\n";
-    file << "data[\"\"] = std::move(str);\n";
-    file << "return templ->genText(data);\n";
-    file << "}\n}\n";
+
+    file << output_buf.getString();
+
+    if (layoutName.empty())
+    {
+        // to copy string
+        file << "std::string ret{" << streamName << ".str()};\n";
+        file << "return ret;\n";
+        file << "}";
+    }
+    else
+    {
+        file << "auto templ = DrTemplateBase::newTemplate(" << layoutName
+             << ");\n";
+        file << "if(!templ) return \"\";\n";
+        file << "HttpViewData data = " << viewDataName << ";\n";
+        file << "auto str = " << streamName << ".str();\n";
+        file << "if(!str.empty() && str[str.length()-1] == '\\n') "
+                "str.resize(str.length()-1);\n";
+        file << "data[\"\"] = std::move(str);\n";
+        file << "return templ->genText(data);\n";
+        file << "}\n";
+    }
 }
